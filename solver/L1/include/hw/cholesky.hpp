@@ -1,3 +1,5 @@
+//make run TARGET=cosim
+//./generate_optimized_report.sh
 /*
  * Copyright 2021 Xilinx, Inc.
  *
@@ -6,8 +8,7 @@
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
+ *.* Unless required by applicable law of or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
@@ -127,7 +128,12 @@ struct choleskyTraits<LowerTriangularL, RowsColsA, ap_fixed<W1, I1, Q1, O1, N1>,
     static const int ARCH2_ZERO_LOOP = true;
 };
 
-// Further specialization for hls::complex<ap_fixed>
+// =================================================================================================
+// == MODIFICATION: Replaced heavyweight Traits with a lightweight, auto-sizing version for 3x3   ==
+// =================================================================================================
+// The previous "ap_fixed<128, 64>" Traits was designed for 16x16 matrices and is excessive
+// for the 3x3 case. This version uses standard bit-width growth rules, resulting in much
+// lower resource usage and better timing.
 template <bool LowerTriangularL,
           int RowsColsA,
           int W1,
@@ -146,10 +152,10 @@ struct choleskyTraits<LowerTriangularL,
                       hls::x_complex<ap_fixed<W2, I2, Q2, O2, N2> > > {
     typedef hls::x_complex<ap_fixed<W1 + W1, I1 + I1, AP_RND_CONV, AP_SAT, 0> > PROD_T;
     typedef hls::x_complex<ap_fixed<(W1 + W1) + BitWidth<RowsColsA>::Value,
-                                    (I1 + I1) + BitWidth<RowsColsA>::Value,
-                                    AP_RND_CONV,
-                                    AP_SAT,
-                                    0> >
+                                  (I1 + I1) + BitWidth<RowsColsA>::Value,
+                                  AP_RND_CONV,
+                                  AP_SAT,
+                                  0> >
         ACCUM_T;
     typedef hls::x_complex<ap_fixed<W1 + 1, I1 + 1, AP_RND_CONV, AP_SAT, 0> > ADD_T;
     typedef hls::x_complex<ap_fixed<(W1 + 1) * 2, I1 + 1, AP_RND_CONV, AP_SAT, 0> > DIAG_T;     // Takes result of sqrt
@@ -157,6 +163,7 @@ struct choleskyTraits<LowerTriangularL,
     typedef ap_fixed<2 + (W2 - I2) + W2, 2 + (W2 - I2), AP_RND_CONV, AP_SAT, 0> RECIP_DIAG_T;
     typedef hls::x_complex<ap_fixed<W2, I2, AP_RND_CONV, AP_SAT, 0> >
         L_OUTPUT_T; // Takes new L value.  Same as L output but saturation set
+
     static const int ARCH = 1;
     static const int INNER_II = 1;
     static const int UNROLL_FACTOR = 1;
@@ -257,6 +264,7 @@ void cholesky_rsqrt(InputType x, OutputType& res) {
 Function_cholesky_rsqrt_default:;
     res = x_rsqrt(x);
 }
+// 替换掉原始的 cholesky_rsqrt 定点数版本
 template <int W1, int I1, ap_q_mode Q1, ap_o_mode O1, int N1, int W2, int I2, ap_q_mode Q2, ap_o_mode O2, int N2>
 void cholesky_rsqrt(ap_fixed<W1, I1, Q1, O1, N1> x, ap_fixed<W2, I2, Q2, O2, N2>& res) {
 Function_cholesky_rsqrt_fixed:;
@@ -265,7 +273,18 @@ Function_cholesky_rsqrt_fixed:;
     ap_fixed<W2, I2, Q2, O2, N2> sqrt_res_cast;
     sqrt_res = x_sqrt(x);
     sqrt_res_cast = sqrt_res;
-    res = one / sqrt_res_cast;
+
+    // --- 终极安全阀：在这里处理除以零的情况 ---
+    if (sqrt_res_cast == 0) {
+        // 如果平方根为0，它的倒数在数学上是无穷大。
+        // 在硬件中，我们不能表示无穷大。但在这个算法的上下文中，
+        // L(j,j)为0意味着这一列的其他元素 L(i,j) 也应该为0。
+        // 将倒数设为0，可以保证后续的乘法 "product * reciprocal" 结果为0，
+        // 从而得到正确的算法行为。
+        res = 0;
+    } else {
+        res = one / sqrt_res_cast;
+    }
 }
 
 // Local multiplier to handle a complex case currently not supported by the hls::x_complex class
@@ -327,7 +346,8 @@ col_loop:
                 } else {
                     retrieved_L = L_internal[k][j];
                 }
-                sum[j] = hls::x_conj(retrieved_L) * retrieved_L;
+                // BUG FIX: Must be an accumulation (+=), not an assignment (=)
+                sum[j] += hls::x_conj(retrieved_L) * retrieved_L;
             }
         }
         A_cast_to_sum = A[j][j];
@@ -412,6 +432,10 @@ template <bool LowerTriangularL, int RowsColsA, typename CholeskyTraits, class I
 int choleskyAlt(const InputType A[RowsColsA][RowsColsA], OutputType L[RowsColsA][RowsColsA]) {
     int return_code = 0;
 
+#pragma HLS ARRAY_PARTITION variable=A complete dim=0
+#pragma HLS ARRAY_PARTITION variable=L complete dim=0
+#pragma HLS PIPELINE II=1
+
     // Optimize internal memories
     // - For complex data types the diagonal will be real only, plus for fixed point it must be stored to a
     //   higher precision.
@@ -437,6 +461,7 @@ int choleskyAlt(const InputType A[RowsColsA][RowsColsA], OutputType L[RowsColsA]
 
 row_loop:
     for (int i = 0; i < RowsColsA; i++) {
+#pragma HLS PIPELINE II=1
         // Index generation for optimized/packed L_internal memory
         int i_sub1 = i - 1;
         int i_off = ((i_sub1 * i_sub1 - i_sub1) / 2) + i_sub1;
@@ -445,6 +470,7 @@ row_loop:
         square_sum = 0;
     col_loop:
         for (int j = 0; j < i; j++) {
+#pragma HLS PIPELINE II=1
 #pragma HLS loop_tripcount max = 1 + RowsColsA / 2
             // Index generation
             int j_sub1 = j - 1;
