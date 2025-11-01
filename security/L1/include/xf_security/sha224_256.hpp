@@ -574,6 +574,11 @@ inline void sha256_iter(uint32_t& a,
                         uint32_t& Kt,
                         const uint32_t K[],
                         short t) {
+    // Prevent inlining so HLS can create a separate RTL module for this
+    // function and insert registers at the function boundary. This helps
+    // reduce the combinational critical path that was observed inside the
+    // 64-round update loop.
+#pragma HLS inline off
     uint32_t Wt = w_strm.read();
     /// temporal variables
     uint32_t T1, T2;
