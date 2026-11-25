@@ -1,5 +1,8 @@
 # 嵌赛FPGA赛道-AMD 命题式基础赛道 - 初赛手册
 
+[Live project page](https://ceasonen.github.io/fpga-optimization/) · [Standalone showcase source](docs/showcase/)
+
+
 ## 📅 重要时间节点
 
 | 时间节点           | 内容                    |
